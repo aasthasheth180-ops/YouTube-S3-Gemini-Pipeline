@@ -83,12 +83,4 @@ streamlit run dashboard.py
 
 ---
 
-## 📝 Updated Resume Bullet Points
-
-* **End-to-End Data Pipeline**: Engineered a Python-based ETL pipeline using **Boto3** to automate the extraction of YouTube trending data into **AWS S3** for scalable cloud storage.
-* **Predictive Modeling**: Implemented **Polynomial Regression** models to forecast viewership trends, utilizing $R^2$ metrics to validate predictive accuracy for 8-week growth cycles.
-* **Generative AI Integration**: Integrated **Google Gemini 2.5 Flash** to provide automated, context-aware competitive analysis and strategic growth recommendations via an interactive **Streamlit** dashboard.
-
----
-
 **Developed by Aastha Sheth**
