@@ -141,7 +141,6 @@ with st.sidebar:
     load_btn = st.button("Load & Analyze", type="primary", use_container_width=True)
     
     st.markdown("---")
-    st.markdown("**Aastha Sheth** \nData Analysis Portfolio \n[GitHub](https://github.com/aasthasheth180-ops)")
 # ─────────────────────────────────────────────────────────────
 # DATA LOADING
 # ─────────────────────────────────────────────────────────────
@@ -454,7 +453,7 @@ with tab1:
         st.dataframe(forecast_df, hide_index=True, use_container_width=True)
  
     elif show_forecast and not has_enough_data:
-        st.caption("⏳ Forecast will appear once 4+ weeks of data are available.")
+        st.caption("Forecast will appear once 4+ weeks of data are available.")
  
     # ── Views by Category ────────────────────────────────────
     st.subheader("Views by Category")
@@ -606,7 +605,7 @@ with tab2:
         # Add note if all channels have video_count = 1
         if channel_stats['video_count'].max() == 1:
             st.caption(
-                "⚠️ Each channel shows 1 video — YouTube's `mostPopular` endpoint returns "
+                "Each channel shows 1 video — YouTube's `mostPopular` endpoint returns "
                 "the top trending video per run. Run `fetch_to_s3.py` daily to accumulate more."
             )
         st.plotly_chart(fig_cnt, use_container_width=True)
@@ -638,7 +637,7 @@ with tab2:
         st.plotly_chart(fig_trend, use_container_width=True)
     else:
         st.info(
-            "📅 Head-to-head trend lines need **3+ weeks** of data. "
+            "Head-to-head trend lines need **3+ weeks** of data. "
             "Currently showing a snapshot comparison instead."
         )
         # Snapshot bar — useful even with 1 day of data
@@ -685,7 +684,7 @@ with tab2:
 # TAB 3 — AI INSIGHTS
 # ══════════════════════════════════════════════════════════════
 with tab3:
-    st.markdown('<span class="ai-badge">Powered by Gemini 1.5 Flash</span>',
+    st.markdown('<span class="ai-badge">Powered by Gemini 2.5 Flash</span>',
                 unsafe_allow_html=True)
     st.subheader("AI-Powered Analysis")
  
@@ -871,7 +870,7 @@ DATA:
  
     # ── Custom Question ───────────────────────────────────────
     st.divider()
-    st.subheader("💬 Ask a Custom Question")
+    st.subheader("Ask a Custom Question")
     user_q = st.text_input(
         "Ask anything about your YouTube data:",
         placeholder="e.g. Which channel has the best growth trajectory?"
