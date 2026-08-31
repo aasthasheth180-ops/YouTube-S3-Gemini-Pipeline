@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 import boto3
@@ -21,7 +22,7 @@ S3_BUCKET = os.getenv("S3_BUCKET")
 AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 
 REGION_CODE = os.getenv("YOUTUBE_REGION", "US")
-MAX_RESULTS = 50
+MAX_RESULTS = 200
 
 
 # ---------------------------------------------------------
@@ -87,18 +88,35 @@ def fetch_trending_videos(region_code):
         maxResults=MAX_RESULTS
     )
 
-    response = request.execute()
+    max_retries = 3
+
+    retryable_status_codes = {429, 500, 502, 503, 504}
+
+    for attempt in range(max_retries):
+
+        try:
+            response = request.execute()
+            break
+
+        except HttpError as exc:
+            status_code = exc.resp.status
+
+            if status_code not in retryable_status_codes:
+                raise
+
+            if attempt == max_retries - 1:
+                raise
+
+            wait_time = 2 ** attempt
+
+            logger.warning(
+                "YouTube API request failed, retrying in %s seconds...",
+                wait_time
+            )
+
+            time.sleep(wait_time)
 
     items = response.get("items", [])
-
-    if not items:
-        raise ValueError(
-            f"YouTube API returned zero videos for region {region_code}"
-        )
-
-    return items
-
-
 # ---------------------------------------------------------
 # SNAPSHOT ENRICHMENT
 # ---------------------------------------------------------
