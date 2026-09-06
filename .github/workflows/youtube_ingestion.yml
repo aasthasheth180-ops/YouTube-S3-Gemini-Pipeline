@@ -3,6 +3,9 @@ name: YouTube Ingestion
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "0 */6 * * *"
+
 jobs:
   ingest:
     runs-on: ubuntu-latest
