@@ -1,0 +1,31 @@
+name: YouTube Ingestion
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+    
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run YouTube ingestion
+        env:
+            YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+            S3_BUCKET: ${{ secrets.S3_BUCKET }}
+            AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+            REGION_CODES: "US,IN,GB,CA"
+            AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+        run: python fetch_to_s3.py

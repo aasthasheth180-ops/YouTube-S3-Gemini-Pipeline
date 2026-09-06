@@ -1,1 +1,0 @@
-print("hello","hello","hello",sep="$")
