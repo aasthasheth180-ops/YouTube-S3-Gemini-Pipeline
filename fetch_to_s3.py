@@ -220,25 +220,25 @@ def fetch_channel_data(channel_ids):
         )
 
 
-    request = youtube.channels().list(
-        part="snippet,statistics",
-        id=",".join(batch)
-    )
+        request = youtube.channels().list(
+            part="snippet,statistics",
+            id=",".join(batch)
+        )
 
-    response = request.execute()
+        response = request.execute()
 
 
-    for item in response.get("items", []):
-        channel_id = item["id"]
-        snippet = item.get("snippet", {})
-        statistics = item.get("statistics", {})
+        for item in response.get("items", []):
+            channel_id = item["id"]
+            snippet = item.get("snippet", {})
+            statistics = item.get("statistics", {})
 
-        channel_map[channel_id] = {
-            "channel_name": snippet.get("title"),
-            "subscriber_count": statistics.get("subscriberCount"),
-            "channel_view_count": statistics.get("viewCount"),
-            "channel_video_count": statistics.get("videoCount"),
-        }
+            channel_map[channel_id] = {
+                "channel_name": snippet.get("title"),
+                "subscriber_count": statistics.get("subscriberCount"),
+                "channel_view_count": statistics.get("viewCount"),
+                "channel_video_count": statistics.get("videoCount"),
+            }
 
     return channel_map
 # ---------------------------------------------------------
@@ -661,7 +661,14 @@ def run_pipeline():
             audit_record
         )
 
-        upload_audit_record(audit_record)
+        try:
+            upload_audit_record(audit_record)
+
+        except Exception as audit_exc:
+            logger.exception(
+                "Failed to upload pipeline audit record: %s",
+                audit_exc
+            )
 
 
 # ---------------------------------------------------------

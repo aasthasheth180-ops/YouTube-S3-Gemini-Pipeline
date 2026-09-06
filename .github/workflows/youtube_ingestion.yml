@@ -27,7 +27,7 @@ jobs:
             YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
             S3_BUCKET: ${{ secrets.S3_BUCKET }}
             AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-            REGION_CODES: "US,IN,GB,CA"
+            YOUTUBE_REGIONS: "US,IN,GB,CA"
             AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
             AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
