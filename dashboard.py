@@ -186,7 +186,7 @@ def parse_records(records):
     df['engagement_rate'] = ((df['like_count'] + df['comment_count'])
                               / df['view_count'].replace(0, np.nan) * 100).round(3)
     df['category'] = df['category_id'].astype(str).map(CAT_MAP).fillna('Other')
-    df = df.dropna(subset=['view_count','published_at']).drop_duplicates('video_id')
+    df = df.dropna(subset=['view_count','published_at'])
     df = df[df['view_count'] > 0].reset_index(drop=True)
     return df
 
