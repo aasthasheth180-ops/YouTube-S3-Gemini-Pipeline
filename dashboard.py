@@ -1,933 +1,958 @@
 """
-YouTube Trending Data Analysis Dashboard
-Aastha Sheth | Portfolio Project
+YouTube Trending Intelligence Dashboard
+Portfolio Project
 
-Run: streamlit run dashboard.py
+Run:
+    streamlit run dashboard.py
 """
 
-import streamlit as st
+import os
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import boto3
-import json
-import google.generativeai as genai
-import os
-import anthropic
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import r2_score
+import streamlit as st
 from dotenv import load_dotenv
-import warnings
-warnings.filterwarnings('ignore')
 
-
-# MUST be here, before any other logic
-load_dotenv() 
-
-# Now the variables will have values instead of 'None'
-s3_bucket = os.getenv("S3_BUCKET")
-
-# Initialize memory if it's the first time opening the app
-
-if 'data_loaded' not in st.session_state:
-    st.session_state.data_loaded = False
-if 'df' not in st.session_state:
-    st.session_state.df = None
-if 'channel_stats' not in st.session_state:
-    st.session_state.channel_stats = None
-if 'weekly' not in st.session_state:
-    st.session_state.weekly = None
-if 'view_r2' not in st.session_state:
-    st.session_state.view_r2 = None
-if 'view_preds' not in st.session_state:
-    st.session_state.view_preds = None
-if 'like_preds' not in st.session_state:
-    st.session_state.like_preds = None
-if 'view_model' not in st.session_state:
-    st.session_state.view_model = None
-if 'x_num' not in st.session_state:
-    st.session_state.x_num = None
-if 'future_views' not in st.session_state:
-    st.session_state.future_views = None
-if 'future_dates' not in st.session_state:
-    st.session_state.future_dates = None
-if 'like_r2' not in st.session_state:
-    st.session_state.like_r2 = None
-
-# ─────────────────────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="YouTube Analytics + AI",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from ai.build_fact_package import build_fact_package, load_raw_history, add_prediction_results
+from ai.gemini_interpreter import (
+    generate_trend_summary,
+    explain_rising_videos,
+    explain_regional_differences,
 )
+from analytics.historical_intelligence import prepare_historical_intelligence
+from build_history import load_audit_history
+
+load_dotenv()
+
+st.set_page_config(
+    page_title="YouTube Trending Intelligence",
+    page_icon="▶️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+EXPECTED_REGIONS = {"CA", "GB", "IN", "US"}
+FRESHNESS_HOURS = 9
 
 st.markdown("""
 <style>
-    /* Keep your existing styles */
-    .main { background-color: #F8FAFC; }
-    .metric-card {
-        background: white; border-radius: 12px;
-        padding: 1rem 1.2rem; border-left: 4px solid #02809090;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-    }
-    .insight-box {
-        background: #1E2235; /* CHANGED to dark background to match your dashboard */
-        color: #FFFFFF;      /* Force text to be white so it's always visible */
-        border-radius: 10px;
-        padding: 1rem 1.2rem; 
-        border-left: 4px solid #1E2761;
-        margin: 0.5rem 0; 
-        font-size: 0.93rem; 
-        line-height: 1.6;
-    }
-    .ai-badge {
-        background: linear-gradient(90deg,#1E2761,#028090);
-        color: white; padding: 0.2rem 0.7rem;
-        border-radius: 20px; font-size: 0.8rem; font-weight: 600;
-    }
-    h1 { color: #1E2761; }
-    .stTabs [data-baseweb="tab"] { font-size: 0.95rem; font-weight: 500; }
-
-    /* ADD the new selection fixes here */
-    .insight-box ::selection {
-        background: #FF0000;
-        color: #FFFFFF;
-    }
-    .insight-box ::-moz-selection {
-        background: #FF0000;
-        color: #FFFFFF;
-    }
-    ::selection {
-        background: #FF000066;
-        color: #FFFFFF;
-    }
+.block-container {padding-top: 2rem; padding-bottom: 3rem;}
+[data-testid="stMetric"] {
+    border: 1px solid rgba(128,128,128,.20);
+    border-radius: 12px;
+    padding: 14px;
+}
+.small-note {opacity:.75; font-size:.88rem;}
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# SIDEBAR — CONFIG
-# ─────────────────────────────────────────────────────────────
-with st.sidebar:
-    # 1. Keep your branding
-    st.image("https://upload.wikimedia.org/wikipedia/commons/b/b8/YouTube_Logo_2017.svg", width=120)
-    st.markdown("## Project Status")
 
-    # 2. SILENT LOADING: Pull values from .env instead of UI
-    # We use 'os.getenv' to get the values you saved in your .env file
-    s3_bucket     = os.getenv("S3_BUCKET")
-    s3_prefix     = "raw/trending/" # Standardized folder path
-    aws_region    = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-    google_api_key = os.getenv("GOOGLE_API_KEY") # Use your new Gemini Key
 
-    # 3. Keep only the useful UI controls
-    # These don't need to be hidden because they control the charts, not security
-    top_n = st.slider("Top N Channels to Compare", 3, 15, 8)
-    
-    # 4. Status Indicator (Shows you it's working)
-    if s3_bucket and google_api_key:
-        st.success("Credentials Loaded")
+def youtube_thumbnail(video_id):
+    """Standard YouTube thumbnail derived from the public video id."""
+    if not video_id:
+        return ""
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+
+def safe_text(value, fallback="Unknown"):
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return fallback
+    return str(value)
+
+
+def category_icon(name):
+    name = safe_text(name, "").lower()
+    if "gaming" in name:
+        return "🎮"
+    if "music" in name:
+        return "🎵"
+    if "sport" in name:
+        return "🏅"
+    if "news" in name:
+        return "📰"
+    if "science" in name or "tech" in name:
+        return "💻"
+    if "education" in name:
+        return "📚"
+    if "film" in name or "entertainment" in name:
+        return "🎬"
+    if "comedy" in name:
+        return "😄"
+    return "▶️"
+
+
+def show_video_card(row, key_prefix):
+    """Compact YouTube-style video card with expandable intelligence."""
+    video_id = safe_text(row.get("id"), "")
+    title = safe_text(row.get("video_title"), "Untitled video")
+    channel = safe_text(row.get("channel_name"), "Unknown channel")
+    category = safe_text(row.get("category_name"), "Unknown")
+    region = safe_text(row.get("region_code"), "—")
+    rank = row.get("trending_rank")
+    movement = row.get("rank_movement")
+    velocity = row.get("view_velocity")
+    probability = row.get("still_trending_tomorrow_probability")
+
+    st.image(youtube_thumbnail(video_id), use_container_width=True)
+    st.markdown(f"**{title}**")
+    st.caption(f"{channel} · {category} · {region}")
+
+    m1, m2 = st.columns(2)
+    m1.metric("Rank", f"#{int(rank)}" if pd.notna(rank) else "—")
+    if pd.notna(movement):
+        arrow = "▲" if movement > 0 else "▼" if movement < 0 else "→"
+        m2.metric("Movement", f"{arrow} {abs(int(movement))}")
     else:
-        st.error("Missing .env keys")
+        m2.metric("Movement", "—")
 
-    st.divider()
-    
-    # 5. The Action Button
-    load_btn = st.button("Load & Analyze", type="primary", use_container_width=True)
-    
-    st.markdown("---")
-# ─────────────────────────────────────────────────────────────
-# DATA LOADING
-# ─────────────────────────────────────────────────────────────
-CAT_MAP = {'1':'Film & Animation','2':'Autos & Vehicles','10':'Music',
-           '15':'Pets & Animals','17':'Sports','20':'Gaming',
-           '22':'People & Blogs','23':'Comedy','24':'Entertainment',
-           '25':'News & Politics','26':'How-to & Style','27':'Education',
-           '28':'Science & Tech','29':'Non-profits'}
+    if pd.notna(velocity):
+        st.caption(f"⚡ {velocity:,.0f} views/hour")
+    if pd.notna(probability):
+        st.progress(float(max(0, min(1, probability))))
+        st.caption(f"🤖 Tomorrow persistence: {probability:.0%}")
+
+    with st.expander("View intelligence"):
+        details = {
+            "Current rank": f"#{int(rank)}" if pd.notna(rank) else "—",
+            "Previous rank": (
+                f"#{int(row.get('previous_rank'))}"
+                if pd.notna(row.get("previous_rank")) else "—"
+            ),
+            "Rank movement": fmt_float(movement, 0),
+            "Views": fmt_int(row.get("view_count")),
+            "View growth": fmt_int(row.get("view_growth")),
+            "View velocity / hour": fmt_int(velocity),
+            "Like velocity / hour": fmt_float(row.get("like_velocity")),
+            "Comment velocity / hour": fmt_float(row.get("comment_velocity")),
+            "Engagement": fmt_pct_fraction(row.get("engagement_rate")),
+            "Trending observations": fmt_int(row.get("trending_observations")),
+            "Hours trending": fmt_float(row.get("hours_trending")),
+            "Days trending": fmt_float(row.get("days_trending")),
+        }
+        st.dataframe(
+            pd.DataFrame(details.items(), columns=["Metric", "Value"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+
+def fmt_int(value):
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{int(value):,}"
+
+
+def fmt_float(value, digits=2):
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):,.{digits}f}"
+
+
+def fmt_pct_fraction(value, digits=2):
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{100 * float(value):.{digits}f}%"
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_from_s3(bucket, prefix, region):
-    s3 = boto3.client('s3', region_name=region)
-    response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
-    records = []
-    for obj in response.get('Contents', []):
-        if obj['Key'].endswith('.json'):
-            raw  = s3.get_object(Bucket=bucket, Key=obj['Key'])
-            data = json.loads(raw['Body'].read().decode('utf-8'))
-            items = data if isinstance(data, list) else data.get('items', [])
-            records.extend(items)
-    return records
+def load_dashboard_data():
+    raw = load_raw_history()
+    intel = prepare_historical_intelligence(raw)
+    latest_with_predictions, prediction_date = add_prediction_results(
+        raw, intel["latest_video_state"]
+    )
+    fact_package = build_fact_package()
 
-def parse_records(records):
-    rows = []
-    for r in records:
-        sn = r.get('snippet', {})
-        st_ = r.get('statistics', {})
-        rows.append({
-            'video_id'      : r.get('id',''),
-            'title'         : sn.get('title',''),
-            'channel_title' : sn.get('channelTitle',''),
-            'channel_id'    : sn.get('channelId',''),
-            'published_at'  : sn.get('publishedAt',''),
-            'category_id'   : sn.get('categoryId',''),
-            'view_count'    : int(st_.get('viewCount', 0)),
-            'like_count'    : int(st_.get('likeCount', 0)),
-            'comment_count' : int(st_.get('commentCount', 0)),
-            'fetch_date'    : r.get('fetch_date', pd.Timestamp.today().strftime('%Y-%m-%d')),
-        })
-    df = pd.DataFrame(rows)
-    df['published_at']  = pd.to_datetime(df['published_at'], errors='coerce')
-    df['fetch_date']    = pd.to_datetime(df['fetch_date'], errors='coerce')
-    df['engagement_rate'] = ((df['like_count'] + df['comment_count'])
-                              / df['view_count'].replace(0, np.nan) * 100).round(3)
-    df['category'] = df['category_id'].astype(str).map(CAT_MAP).fillna('Other')
-    df = df.dropna(subset=['view_count','published_at'])
-    df = df[df['view_count'] > 0].reset_index(drop=True)
-    return df
+    try:
+        audit = load_audit_history()
+        if not isinstance(audit, pd.DataFrame):
+            audit = pd.DataFrame(audit)
+    except Exception:
+        audit = pd.DataFrame()
 
-def compute_channel_stats(df, top_n):
-    return (df.groupby('channel_title')
-              .agg(total_views    =('view_count','sum'),
-                   median_views   =('view_count','median'),
-                   total_likes    =('like_count','sum'),
-                   avg_engagement =('engagement_rate','mean'),
-                   video_count    =('video_id','count'),
-                   top_category   =('category', lambda x: x.mode()[0]))
-              .reset_index()
-              .assign(views_per_video=lambda d: (d.total_views/d.video_count).round(0))
-              .sort_values('total_views', ascending=False)
-              .head(top_n)
-              .reset_index(drop=True))
-
-def fit_trend(x_dates, y_values, degree=3):
-    x_num = (x_dates - x_dates.min()).dt.days.values.reshape(-1,1)
-    model = Pipeline([('poly', PolynomialFeatures(degree)),('reg', LinearRegression())])
-    model.fit(x_num, y_values)
-    preds = model.predict(x_num)
-    return preds, r2_score(y_values, preds), model, x_num
-
-def forecast(model, x_num, weeks=8):
-    last_x = x_num[-1][0]
-    future_x = np.array([[last_x + 7*i] for i in range(1, weeks+1)])
-    return model.predict(future_x)
-
-# ─────────────────────────────────────────────────────────────
-# MAIN APP
-# ─────────────────────────────────────────────────────────────
+    return raw, intel, latest_with_predictions, prediction_date, fact_package, audit
 
 
-st.title("YouTube Trending Analysis + AI Insights")
-st.markdown("**Competitor channel comparison · Trend prediction · Gemini-powered insights**")
+def current_prediction_rows(latest_with_predictions, prediction_date):
+    result = latest_with_predictions.copy()
+    result["observed_date"] = (
+        pd.to_datetime(result["fetch_timestamp"], utc=True, errors="coerce")
+        .dt.tz_localize(None)
+        .dt.normalize()
+    )
+    date = pd.to_datetime(prediction_date).normalize()
+    return result[result["observed_date"] == date].copy()
 
-# ── NEW DATA LOADING LOGIC (Paste here) ────────────────────────────────────────────────
-if load_btn:
-    with st.spinner("Loading data from S3..."):
-        try:
-            records = load_from_s3(s3_bucket, s3_prefix, aws_region)
-            df = parse_records(records)
-            channel_stats = compute_channel_stats(df, top_n)
 
-            # Clean week column for plotly (Fixes the messy X-axis)
-            df['week'] = (df['published_at']
-                          .dt.to_period('W')
-                          .dt.start_time
-                          .dt.normalize()
-                          .dt.date)
-            df['week'] = pd.to_datetime(df['week'])
+def build_quality_metrics(raw):
+    q = raw.copy()
+    q["fetch_date"] = pd.to_datetime(q["fetch_date"], errors="coerce").dt.normalize()
 
-            weekly = (df.groupby('week')
-                        .agg(avg_views  =('view_count', 'median'),
-                             avg_likes  =('like_count',  'median'),
-                             video_count=('video_id',    'count'))
-                        .reset_index()
-                        .sort_values('week'))
-            
-            has_enough = len(weekly) >= 4
+    duplicate_count = int(
+        q.duplicated(subset=["id", "region_code", "fetch_timestamp"]).sum()
+    )
 
-            # Trend Fitting Logic
-            if has_enough:
-                view_preds, view_r2, view_model, x_num = fit_trend(weekly['week'], weekly['avg_views'])
-                like_preds, like_r2, _,           _    = fit_trend(weekly['week'], weekly['avg_likes'])
-                future_dates = pd.date_range(weekly['week'].max() + pd.Timedelta('7D'), periods=8, freq='W')
-                future_views = forecast(view_model, x_num, 8)
-            else:
-                view_preds, like_preds = weekly['avg_views'].values, weekly['avg_likes'].values
-                view_r2, like_r2 = float('nan'), float('nan')
-                future_views = np.array([weekly['avg_views'].iloc[-1]] * 8)
-                future_dates = pd.date_range(weekly['week'].max() + pd.Timedelta('7D'), periods=8, freq='W')
+    missing = {}
+    for col in [
+        "id", "region_code", "fetch_timestamp", "trending_rank",
+        "category_name", "channel_name"
+    ]:
+        if col in q.columns:
+            missing[col] = int(q[col].isna().sum())
 
-            # --- CRITICAL: SAVE TO SESSION STATE ---
-            st.session_state.df            = df
-            st.session_state.channel_stats = channel_stats
-            st.session_state.data_loaded   = True
-            st.session_state.weekly        = weekly
-            st.session_state.view_r2       = view_r2
-            st.session_state.future_views  = future_views
-            st.session_state.future_dates  = future_dates
-            st.session_state.like_r2 = like_r2
-            st.session_state.like_preds = like_preds
+    region_days = (
+        q.dropna(subset=["fetch_date", "region_code"])
+        .groupby("fetch_date")["region_code"]
+        .agg(lambda x: set(x))
+    )
+    complete_days = int(region_days.apply(lambda x: EXPECTED_REGIONS.issubset(x)).sum())
+    incomplete_days = int(len(region_days) - complete_days)
 
-            st.success(f"Loaded {len(df):,} videos")
-        except Exception as e:
-            st.error(f"S3 load failed: {e}")
-            st.stop()
+    category_complete = (
+        100 * q["category_name"].notna().mean()
+        if "category_name" in q.columns and len(q) else np.nan
+    )
+    channel_complete = (
+        100 * q["channel_name"].notna().mean()
+        if "channel_name" in q.columns and len(q) else np.nan
+    )
 
-# ── GATE: Check if data is in memory ──
-if not st.session_state.get('data_loaded', False):
-    st.info("Configure credentials in the sidebar, then click **Load & Analyze**.")
+    return {
+        "duplicate_count": duplicate_count,
+        "missing": missing,
+        "complete_days": complete_days,
+        "incomplete_days": incomplete_days,
+        "category_complete": category_complete,
+        "channel_complete": channel_complete,
+    }
+
+
+def normalize_audit(audit):
+    if audit.empty:
+        return audit
+    a = audit.copy()
+    for col in ["started_at", "ended_at"]:
+        if col in a.columns:
+            a[col] = pd.to_datetime(a[col], utc=True, errors="coerce")
+    for col in ["records_fetched", "records_written", "retry_count"]:
+        if col in a.columns:
+            a[col] = pd.to_numeric(a[col], errors="coerce").fillna(0)
+    return a
+
+
+with st.sidebar:
+    st.image(
+        "https://upload.wikimedia.org/wikipedia/commons/b/b8/YouTube_Logo_2017.svg",
+        width=125,
+    )
+    st.markdown("## Project Status")
+    if os.getenv("S3_BUCKET"):
+        st.success("S3 configuration loaded")
+    else:
+        st.error("S3 configuration missing")
+
+    if os.getenv("GOOGLE_API_KEY"):
+        st.success("Gemini configuration loaded")
+    else:
+        st.warning("Gemini key not configured")
+
+    refresh = st.button("Refresh historical data", use_container_width=True)
+    if refresh:
+        st.cache_data.clear()
+        st.rerun()
+
+st.title("YouTube Trending Intelligence")
+st.caption(
+    "Historical trend analytics · Cross-region intelligence · "
+    "Random Forest persistence prediction · Grounded Gemini explanations"
+)
+
+try:
+    with st.spinner("Loading historical intelligence from S3..."):
+        raw, intel, latest_pred, prediction_date, facts, audit = load_dashboard_data()
+except Exception as exc:
+    st.error(f"Dashboard data load failed: {exc}")
     st.stop()
 
-# ── RETRIEVE: Pull data back out for the Tabs ──
-df            = st.session_state.df
-channel_stats = st.session_state.channel_stats
-weekly        = st.session_state.weekly
-view_preds    = st.session_state.get('view_preds')
-view_r2       = st.session_state.view_r2
-future_views  = st.session_state.future_views
-future_dates  = st.session_state.future_dates
-like_preds = st.session_state.get('like_preds', np.array([]))
-like_r2    = st.session_state.get('like_r2', 0.0) # Fallback to 0.0 instead of None
-has_enough = st.session_state.get('has_enough', False)
+audit = normalize_audit(audit)
+prediction_rows = current_prediction_rows(latest_pred, prediction_date)
+quality = build_quality_metrics(raw)
 
-top_n          = len(channel_stats) if channel_stats is not None else 8
-
-
-# ─────────────────────────────────────────────────────────────
-# KPI ROW
-# ─────────────────────────────────────────────────────────────
- 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Total Videos",    f"{len(df):,}")
-k2.metric("Unique Channels", f"{df['channel_title'].nunique():,}")
-k3.metric("Median Views",    f"{df['view_count'].median()/1e3:.1f}K")
-k4.metric("Avg Engagement",  f"{df['engagement_rate'].mean():.2f}%")
- 
-# Safe R² display — show "—" when not enough data instead of nan
-r2_display = f"{view_r2:.3f}" if (view_r2 == view_r2) else "—"   # nan != nan is True
-r2_delta   = ("Strong" if view_r2 > 0.7
-               else "Moderate" if view_r2 > 0.4
-               else "Weak" if view_r2 == view_r2
-               else "Need 4+ weeks")
-k5.metric("View Trend R²", r2_display, delta=r2_delta)
+k1.metric("Historical observations", fmt_int(len(raw)))
+k2.metric("Unique videos", fmt_int(raw["id"].nunique()))
+k3.metric("Regions", fmt_int(raw["region_code"].nunique()))
+k4.metric("Prediction date", str(pd.to_datetime(prediction_date).date()))
+k5.metric("Model", "Random Forest")
 
-
-# ─────────────────────────────────────────────────────────────
-# TABS
-# ─────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
-    "Trend Prediction",
-    "Competitor Comparison",
-    "AI Insights",
-    "Raw Data"
+tabs = st.tabs([
+    "🏠 Overview",
+    "🔥 Trend Intelligence",
+    "🎬 Content",
+    "🌎 Regions",
+    "🤖 ML Prediction",
+    "✨ AI Intelligence",
+    "⚙️ Pipeline Health",
+    "🔎 Explorer",
 ])
 
-# ══════════════════════════════════════════════════════════════
-# TAB 1 — TREND PREDICTION
-# ══════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════
-# TAB 1 — TREND PREDICTION  (FIXED)
-# ══════════════════════════════════════════════════════════════
-with tab1:
-    st.subheader("View & Like Trends Over Time")
- 
-    # ── GUARD: need at least 4 weeks to draw a meaningful trend ──
-    has_enough_data = len(weekly) >= 4
- 
-    col1, col2 = st.columns([3, 1])
-    with col2:
-        show_forecast = st.checkbox("Show 8-week forecast", value=True)
-        show_ci       = st.checkbox("Show confidence band",  value=True)
-        metric_sel    = st.radio("Metric", ["Views", "Likes", "Both"], index=0)
- 
-    with col1:
-        if not has_enough_data:
+# ---------------------------------------------------------------------
+# OVERVIEW — current trending pulse
+# ---------------------------------------------------------------------
+with tabs[0]:
+    st.subheader("🔥 Current Trending Pulse")
+    st.caption(
+        "Latest observed video-region states, combining rank momentum, velocity, "
+        "lifecycle and model outlook."
+    )
+
+    latest_date = pd.to_datetime(prediction_date).normalize()
+    current = latest_pred.copy()
+    current["observed_date"] = (
+        pd.to_datetime(current["fetch_timestamp"], utc=True, errors="coerce")
+        .dt.tz_localize(None).dt.normalize()
+    )
+    current = current[current["observed_date"] == latest_date].copy()
+
+    rising = current[current["rank_movement"] > 0].sort_values(
+        ["rank_movement", "view_velocity"], ascending=[False, False]
+    )
+    velocity_leader = current.sort_values("view_velocity", ascending=False).head(1)
+    best_rank = current.sort_values("trending_rank").head(1)
+
+    o1, o2, o3, o4 = st.columns(4)
+    o1.metric("Current video-region states", fmt_int(len(current)))
+    o2.metric("Rising now", fmt_int(len(rising)))
+    o3.metric(
+        "Fastest rise",
+        f"▲ {int(rising.iloc[0]['rank_movement'])}" if not rising.empty else "—",
+    )
+    o4.metric(
+        "Likely to persist",
+        fmt_int(
+            (pd.to_numeric(
+                current["still_trending_tomorrow_prediction"], errors="coerce"
+            ) == 1).sum()
+        ),
+    )
+
+    st.markdown("### 🚀 Top Movers")
+    cards = rising.head(4)
+    if cards.empty:
+        st.info("No rising videos are available for the latest prediction date.")
+    else:
+        card_cols = st.columns(len(cards))
+        for idx, ((_, row), col) in enumerate(zip(cards.iterrows(), card_cols)):
+            with col:
+                show_video_card(row, f"overview_{idx}")
+
+    st.markdown("### Today at a glance")
+    g1, g2 = st.columns(2)
+    with g1:
+        if not velocity_leader.empty:
+            row = velocity_leader.iloc[0]
             st.info(
-        f"Only **{len(weekly)} week(s)** of data. "
-        "Run `fetch_to_s3.py` daily for 4+ weeks to unlock trend lines and forecasts."
+                f"⚡ **Velocity leader:** {safe_text(row.get('video_title'))}\n\n"
+                f"{fmt_int(row.get('view_velocity'))} views/hour · "
+                f"{safe_text(row.get('region_code'))}"
             )
-            if len(weekly) > 0:
-                weekly_plot = weekly.copy()
-                weekly_plot['week_label'] = pd.to_datetime(weekly_plot['week']).dt.strftime('%b %d, %Y')
- 
-            fig_bar = go.Figure(go.Bar(
-                x=weekly_plot['week_label'],   # string labels, not datetime — avoids x-axis bug
-                y=weekly_plot['avg_views'],
-                marker_color='#FF0000',
-                text=weekly_plot['avg_views'].apply(
-                    lambda v: f"{v/1e6:.2f}M" if v >= 1e6 else f"{v/1e3:.0f}K"),
-                textposition='outside'
-            ))
-            fig_bar.update_layout(
-                height=350,
-                title="Weekly Median Views (collecting history — run fetch daily)",
-                template='plotly_dark',
-                paper_bgcolor='#1E2235',
-                plot_bgcolor='#1E2235',
-                xaxis_title="Week",
-                yaxis_title="Median Views",
-                showlegend=False,
-                yaxis=dict(tickformat='.2s', showgrid=True, gridcolor='#2D3348'),
-                xaxis=dict(showgrid=False)
+    with g2:
+        if not best_rank.empty:
+            row = best_rank.iloc[0]
+            st.info(
+                f"🏆 **Top observed rank:** {safe_text(row.get('video_title'))}\n\n"
+                f"Rank #{int(row.get('trending_rank'))} · "
+                f"{safe_text(row.get('region_code'))}"
             )
-            st.plotly_chart(fig_bar, use_container_width=True)
-        else:
-            # ── full trend chart ──
-            fig = go.Figure()
- 
-            if metric_sel in ["Views", "Both"]:
-                fig.add_trace(go.Scatter(
-                    x=weekly['week'], y=weekly['avg_views'],
-                    mode='lines+markers', name='Actual Views',
-                    line=dict(color='#FFFFFF', width=2),
-                    marker=dict(size=5, color='#FFFFFF')))
-                fig.add_trace(go.Scatter(
-                    x=weekly['week'], y=view_preds,
-                    mode='lines', name=f'Trend (R²={view_r2:.2f})',
-                    line=dict(color='#02C39A', width=2.5, dash='dash')))
-                if show_forecast:
-                    fig.add_trace(go.Scatter(
-                        x=future_dates, y=future_views,
-                        mode='lines+markers', name='8-wk Forecast',
-                        line=dict(color='#F59E0B', width=2, dash='dot'),
-                        marker=dict(size=6, symbol='square', color='#F59E0B')))
-                    if show_ci:
-                        fig.add_trace(go.Scatter(
-                            x=list(future_dates) + list(future_dates[::-1]),
-                            y=list(future_views * 1.15) + list((future_views * 0.85)[::-1]),
-                            fill='toself',
-                            fillcolor='rgba(245,158,11,0.12)',
-                            line=dict(color='rgba(0,0,0,0)'),
-                            name='±15% CI',
-                            showlegend=True))
- 
-            if metric_sel in ["Likes", "Both"]:
-                fig.add_trace(go.Scatter(
-                    x=weekly['week'], y=weekly['avg_likes'],
-                    mode='lines+markers', name='Actual Likes',
-                    line=dict(color='#A78BFA', width=2),
-                    marker=dict(size=5, color='#A78BFA')))
-                fig.add_trace(go.Scatter(
-                    x=weekly['week'], y=like_preds,
-                    mode='lines', name=f'Like Trend (R²={like_r2:.2f})',
-                    line=dict(color='#EC4899', width=2.5, dash='dash')))
- 
-            fig.update_layout(
-                height=420,
-                template='plotly_dark',
-                paper_bgcolor='#1E2235',
-                plot_bgcolor='#1E2235',
-                hovermode='x unified',
-                legend=dict(orientation='h', y=-0.25, font=dict(size=11)),
-                xaxis=dict(showgrid=True, gridcolor='#2D3348'),
-                yaxis=dict(showgrid=True, gridcolor='#2D3348',
-                           tickformat='.2s')  # auto K/M formatting
+
+
+# ---------------------------------------------------------------------
+# TREND INTELLIGENCE
+# ---------------------------------------------------------------------
+with tabs[1]:
+    st.subheader("🔥 Trend Intelligence")
+    hist_tab, rank_tab, velocity_tab, life_tab = st.tabs(
+        ["Historical", "Rank Movers", "Growth & Velocity", "Lifecycle"]
+    )
+
+    history = intel["video_history"].copy()
+    history["fetch_date"] = pd.to_datetime(history["fetch_date"], errors="coerce")
+
+    with hist_tab:
+        daily = (
+            history.groupby("fetch_date", as_index=False)
+            .agg(
+                observations=("id", "count"),
+                unique_videos=("id", "nunique"),
+                unique_channels=("channel_name", "nunique"),
+            )
+            .sort_values("fetch_date")
+        )
+        fig = px.line(
+            daily,
+            x="fetch_date",
+            y=["observations", "unique_videos"],
+            markers=True,
+            title="Historical Trending Activity",
+            labels={"value": "Count", "fetch_date": "Collection date", "variable": "Metric"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        region_daily = (
+            history.groupby(["fetch_date", "region_code"], as_index=False)
+            .agg(observations=("id", "count"))
+        )
+        fig = px.line(
+            region_daily,
+            x="fetch_date",
+            y="observations",
+            color="region_code",
+            title="Historical Observations by Region",
+            labels={"observations": "Observations", "fetch_date": "Collection date"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with rank_tab:
+        latest_states = intel["latest_video_state"].copy()
+        movers = latest_states.dropna(subset=["rank_movement"]).copy()
+        fastest_rising = movers.sort_values("rank_movement", ascending=False).head(12)
+        fastest_falling = movers.sort_values("rank_movement", ascending=True).head(12)
+
+        r1, r2 = st.columns(2)
+        with r1:
+            st.markdown("#### 🚀 Fastest Rising")
+            chart = fastest_rising.sort_values("rank_movement")
+            fig = px.bar(
+                chart, x="rank_movement", y="video_title", orientation="h",
+                title="Largest Positive Rank Movement",
+                labels={"rank_movement": "Positions gained", "video_title": "Video"},
             )
             st.plotly_chart(fig, use_container_width=True)
- 
-    # ── 8-Week Forecast Table ─────────────────────────────────
-    if show_forecast and has_enough_data:
-        st.markdown("**8-Week View Forecast**")
- 
-        # FIX: direction was broken because enumerate starts at 0
-        # future_views[i-1] when i=0 wraps to future_views[-1] (last element!)
-        # Correct logic: compare each week to the previous week properly
-        directions = []
-        for i, v in enumerate(future_views):
-            if i == 0:
-                # compare first forecast week to last actual week
-                prev = weekly['avg_views'].iloc[-1]
-            else:
-                prev = future_views[i - 1]
-            directions.append("▲ Up" if v > prev else "▼ Down" if v < prev else "→ Flat")
- 
-        forecast_df = pd.DataFrame({
-            'Week'           : future_dates.strftime('%b %d, %Y'),
-            'Forecast Views' : [f"{v:,.0f}" for v in future_views],
-            'vs Prev Week'   : directions
-        })
-        st.dataframe(forecast_df, hide_index=True, use_container_width=True)
- 
-    elif show_forecast and not has_enough_data:
-        st.caption("Forecast will appear once 4+ weeks of data are available.")
- 
-    # ── Views by Category ────────────────────────────────────
-    st.subheader("Views by Category")
- 
-    # Check if we have enough date spread for a line chart
-    n_weeks = df['published_at'].dt.to_period('W').nunique()
- 
-    if n_weeks >= 3:
-        df['week_dt'] = df['published_at'].dt.to_period('W').dt.start_time
-        top_cats = df['category'].value_counts().head(6).index
-        cat_weekly = (df[df['category'].isin(top_cats)]
-                      .groupby(['week_dt', 'category'])['view_count']
-                      .median().reset_index())
-        fig_cat = px.line(
-            cat_weekly, x='week_dt', y='view_count',
-            color='category',
-            template='plotly_dark',
-            color_discrete_sequence=px.colors.qualitative.Set2,
-            labels={'view_count': 'Median Views', 'week_dt': 'Week', 'category': 'Category'}
-        )
-        fig_cat.update_layout(
-            height=360,
-            paper_bgcolor='#1E2235',
-            plot_bgcolor='#1E2235',
-            legend=dict(orientation='h', y=-0.25),
-            xaxis=dict(showgrid=True, gridcolor='#2D3348'),
-            yaxis=dict(showgrid=True, gridcolor='#2D3348', tickformat='.2s')
-        )
-        st.plotly_chart(fig_cat, use_container_width=True)
-    else:
-        # ── fallback: bar chart of total views by category (works with 1 day of data)
-        cat_totals = (df.groupby('category')['view_count']
-                      .sum().sort_values(ascending=False).head(8).reset_index())
-        fig_cat = px.bar(
-            cat_totals, x='view_count', y='category',
-            orientation='h',
-            template='plotly_dark',
-            color='view_count',
-            color_continuous_scale='Teal',
-            labels={'view_count': 'Total Views', 'category': 'Category'},
-            title="Total Views by Category (weekly trend available after 3+ weeks)"
-        )
-        fig_cat.update_layout(
-            height=380,
-            paper_bgcolor='#1E2235',
-            plot_bgcolor='#1E2235',
-            showlegend=False,
-            coloraxis_showscale=False,
-            yaxis={'categoryorder': 'total ascending'}
-        )
-        fig_cat.update_traces(
-            text=cat_totals['view_count'].apply(
-                lambda v: f"{v/1e6:.2f}M" if v >= 1e6 else f"{v/1e3:.0f}K"),
-            textposition='outside'
-        )
-        st.plotly_chart(fig_cat, use_container_width=True)
- 
-# ══════════════════════════════════════════════════════════════
-# TAB 2 — COMPETITOR COMPARISON  (FIXED)
-# ══════════════════════════════════════════════════════════════
-with tab2:
-    st.subheader(f"Top {top_n} Channels — Competitor Analysis")
- 
-    colors_list = px.colors.qualitative.Set2
-    channels    = channel_stats['channel_title'].tolist()
- 
-    # ── ROW 1: Total Views + Engagement side by side ──────────
-    r1c1, r1c2 = st.columns(2)
- 
-    with r1c1:
-        fig_views = go.Figure(go.Bar(
-            x=channel_stats['total_views'],
-            y=channels,
-            orientation='h',
-            marker_color=colors_list[:len(channels)],
-            text=channel_stats['total_views'].apply(
-                lambda v: f"{v/1e6:.2f}M" if v >= 1e6 else f"{v/1e3:.0f}K"),
-            textposition='outside'
-        ))
-        fig_views.update_layout(
-            title="Total Views",
-            height=380, template='plotly_dark',
-            paper_bgcolor='#1E2235', plot_bgcolor='#1E2235',
-            showlegend=False, margin=dict(l=10, r=60, t=40, b=10),
-            xaxis=dict(tickformat='.2s', showgrid=True, gridcolor='#2D3348'),
-            yaxis=dict(autorange='reversed', showgrid=False)
-        )
-        st.plotly_chart(fig_views, use_container_width=True)
- 
-    with r1c2:
-        fig_eng = go.Figure(go.Bar(
-            x=channel_stats['avg_engagement'].round(2),
-            y=channels,
-            orientation='h',
-            marker_color=colors_list[:len(channels)],
-            text=channel_stats['avg_engagement'].round(2).astype(str) + '%',
-            textposition='outside'
-        ))
-        fig_eng.update_layout(
-            title="Avg Engagement Rate (%)",
-            height=380, template='plotly_dark',
-            paper_bgcolor='#1E2235', plot_bgcolor='#1E2235',
-            showlegend=False, margin=dict(l=10, r=60, t=40, b=10),
-            xaxis=dict(showgrid=True, gridcolor='#2D3348', ticksuffix='%'),
-            yaxis=dict(autorange='reversed', showgrid=False)
-        )
-        st.plotly_chart(fig_eng, use_container_width=True)
- 
-    # ── ROW 2: Views per Video + Video Count ──────────────────
-    r2c1, r2c2 = st.columns(2)
- 
-    with r2c1:
-        fig_eff = go.Figure(go.Bar(
-            x=channel_stats['views_per_video'],
-            y=channels,
-            orientation='h',
-            marker_color=colors_list[:len(channels)],
-            text=channel_stats['views_per_video'].apply(
-                lambda v: f"{v/1e6:.2f}M" if v >= 1e6 else f"{v/1e3:.0f}K"),
-            textposition='outside'
-        ))
-        fig_eff.update_layout(
-            title="Views per Video (Efficiency)",
-            height=380, template='plotly_dark',
-            paper_bgcolor='#1E2235', plot_bgcolor='#1E2235',
-            showlegend=False, margin=dict(l=10, r=60, t=40, b=10),
-            xaxis=dict(tickformat='.2s', showgrid=True, gridcolor='#2D3348'),
-            yaxis=dict(autorange='reversed', showgrid=False)
-        )
-        st.plotly_chart(fig_eff, use_container_width=True)
- 
-    with r2c2:
-        fig_cnt = go.Figure(go.Bar(
-            x=channel_stats['video_count'],
-            y=channels,
-            orientation='h',
-            marker_color=colors_list[:len(channels)],
-            text=channel_stats['video_count'].astype(str) + ' videos',
-            textposition='outside'
-        ))
-        fig_cnt.update_layout(
-            title="Video Count (videos fetched)",
-            height=380, template='plotly_dark',
-            paper_bgcolor='#1E2235', plot_bgcolor='#1E2235',
-            showlegend=False, margin=dict(l=10, r=60, t=40, b=10),
-            xaxis=dict(showgrid=True, gridcolor='#2D3348'),
-            yaxis=dict(autorange='reversed', showgrid=False)
-        )
-        # Add note if all channels have video_count = 1
-        if channel_stats['video_count'].max() == 1:
-            st.caption(
-                "Each channel shows 1 video — YouTube's `mostPopular` endpoint returns "
-                "the top trending video per run. Run `fetch_to_s3.py` daily to accumulate more."
+        with r2:
+            st.markdown("#### 📉 Fastest Falling")
+            chart = fastest_falling.copy()
+            chart["positions_lost"] = chart["rank_movement"].abs()
+            chart = chart.sort_values("positions_lost")
+            fig = px.bar(
+                chart, x="positions_lost", y="video_title", orientation="h",
+                title="Largest Negative Rank Movement",
+                labels={"positions_lost": "Positions lost", "video_title": "Video"},
             )
-        st.plotly_chart(fig_cnt, use_container_width=True)
- 
-    # ── Monthly Trend Lines ───────────────────────────────────
-    st.subheader("Monthly View Trends — Head to Head")
- 
-    n_weeks_ch = df[df['channel_title'].isin(channels)]['published_at'].dt.to_period('W').nunique()
- 
-    if n_weeks_ch >= 3:
-        df['week_dt'] = df['published_at'].dt.to_period('W').dt.start_time
-        ch_weekly = (df[df['channel_title'].isin(channels)]
-                     .groupby(['week_dt', 'channel_title'])['view_count']
-                     .median().reset_index())
-        fig_trend = px.line(
-            ch_weekly, x='week_dt', y='view_count',
-            color='channel_title',
-            template='plotly_dark',
-            color_discrete_sequence=colors_list,
-            labels={'view_count': 'Median Views', 'channel_title': 'Channel', 'week_dt': 'Week'}
-        )
-        fig_trend.update_layout(
-            height=400,
-            paper_bgcolor='#1E2235', plot_bgcolor='#1E2235',
-            legend=dict(orientation='h', y=-0.25),
-            xaxis=dict(showgrid=True, gridcolor='#2D3348'),
-            yaxis=dict(showgrid=True, gridcolor='#2D3348', tickformat='.2s')
-        )
-        st.plotly_chart(fig_trend, use_container_width=True)
-    else:
-        st.info(
-            "Head-to-head trend lines need **3+ weeks** of data. "
-            "Currently showing a snapshot comparison instead."
-        )
-        # Snapshot bar — useful even with 1 day of data
-        fig_snap = px.bar(
-            channel_stats.sort_values('total_views', ascending=False),
-            x='channel_title', y='total_views',
-            color='channel_title',
-            template='plotly_dark',
-            color_discrete_sequence=colors_list,
-            labels={'total_views': 'Total Views', 'channel_title': 'Channel'},
-            title="Current Snapshot — Total Views by Channel"
-        )
-        fig_snap.update_layout(
-            height=380,
-            paper_bgcolor='#1E2235', plot_bgcolor='#1E2235',
-            showlegend=False,
-            xaxis=dict(tickangle=-30),
-            yaxis=dict(tickformat='.2s')
-        )
-        st.plotly_chart(fig_snap, use_container_width=True)
- 
-    # ── Stats Table ───────────────────────────────────────────
-    st.subheader("Channel Stats Table")
-    display_df = channel_stats.copy()
-    display_df['total_views']     = display_df['total_views'].apply(
-        lambda x: f"{x/1e6:.2f}M" if x >= 1e6 else f"{x/1e3:.0f}K")
-    display_df['avg_engagement']  = display_df['avg_engagement'].apply(lambda x: f"{x:.2f}%")
-    display_df['views_per_video'] = display_df['views_per_video'].apply(
-        lambda x: f"{x/1e6:.2f}M" if x >= 1e6 else f"{x/1e3:.0f}K")
-    st.dataframe(
-        display_df[['channel_title', 'total_views', 'avg_engagement',
-                    'views_per_video', 'video_count', 'top_category']],
-        hide_index=True, use_container_width=True,
-        column_config={
-            'channel_title'  : st.column_config.TextColumn("Channel"),
-            'total_views'    : st.column_config.TextColumn("Total Views"),
-            'avg_engagement' : st.column_config.TextColumn("Engagement Rate"),
-            'views_per_video': st.column_config.TextColumn("Views / Video"),
-            'video_count'    : st.column_config.NumberColumn("Videos Fetched", format="%d"),
-            'top_category'   : st.column_config.TextColumn("Top Category"),
+            st.plotly_chart(fig, use_container_width=True)
+
+    with velocity_tab:
+        metric_map = {
+            "View velocity": "view_velocity",
+            "View growth": "view_growth",
+            "Like velocity": "like_velocity",
+            "Comment velocity": "comment_velocity",
+            "Engagement movement": "engagement_rate_movement",
         }
-    )
-# ══════════════════════════════════════════════════════════════
-# TAB 3 — AI INSIGHTS
-# ══════════════════════════════════════════════════════════════
-with tab3:
-    st.markdown('<span class="ai-badge">Powered by Gemini 2.5 Flash</span>',
-                unsafe_allow_html=True)
-    st.subheader("AI-Powered Analysis")
- 
-    if not google_api_key:
-        st.warning("Enter your Gemini API key in the sidebar to enable AI insights.")
-        st.stop()
- 
-    # ── FIX 1: Much richer summary so Gemini can give real answers ──
-    def build_summary():
-        top5 = channel_stats.head(5)
- 
-        # Per-category stats
-        cat_stats = (df.groupby('category')
-                       .agg(total_views   =('view_count', 'sum'),
-                            median_views  =('view_count', 'median'),
-                            video_count   =('video_id',   'count'),
-                            avg_engagement=('engagement_rate', 'mean'))
-                       .sort_values('total_views', ascending=False)
-                       .head(6)
-                       .round(1))
- 
-        # Top 3 individual videos
-        top_videos = (df.sort_values('view_count', ascending=False)
-                        [['title', 'channel_title', 'category',
-                          'view_count', 'like_count', 'engagement_rate']]
-                        .head(3)
-                        .to_string(index=False))
- 
-        # Weekly trend summary (if available)
-        if len(weekly) >= 2:
-            first_week_views = weekly['avg_views'].iloc[0]
-            last_week_views  = weekly['avg_views'].iloc[-1]
-            pct_change = ((last_week_views - first_week_views)
-                          / first_week_views * 100) if first_week_views > 0 else 0
-            trend_summary = (
-                f"Views changed {pct_change:+.1f}% from first to latest week "
-                f"({first_week_views:,.0f} → {last_week_views:,.0f} median views). "
-                f"Trend R²: {view_r2:.3f} ({'strong' if view_r2 > 0.7 else 'moderate' if view_r2 > 0.4 else 'weak'} fit). "
-                f"8-week forecast direction: {'upward ↑' if has_enough and future_views[-1] > future_views[0] else 'downward ↓' if has_enough else 'not enough data yet'}."
-            )
-        else:
-            trend_summary = "Only 1 week of data collected so far — trend not yet meaningful."
- 
-        # Engagement leaders
-        eng_leaders = (df.groupby('channel_title')
-                         .filter(lambda x: len(x) >= 1)
-                         .groupby('channel_title')['engagement_rate']
-                         .mean()
-                         .sort_values(ascending=False)
-                         .head(5)
-                         .round(2)
-                         .to_string())
- 
-        return f"""
-=== YOUTUBE TRENDING DATA ANALYSIS ===
-Dataset: {len(df)} trending videos | {df['channel_title'].nunique()} unique channels
-Collection date range: {df['published_at'].min().date()} to {df['published_at'].max().date()}
- 
---- OVERALL METRICS ---
-Median views per video : {df['view_count'].median():,.0f}
-Mean views per video   : {df['view_count'].mean():,.0f}
-Median likes per video : {df['like_count'].median():,.0f}
-Avg engagement rate    : {df['engagement_rate'].mean():.2f}%
-Most common category   : {df['category'].mode()[0]}
- 
---- TREND ANALYSIS ---
-{trend_summary}
- 
---- TOP 5 CHANNELS BY TOTAL VIEWS ---
-{top5[['channel_title','total_views','avg_engagement','views_per_video','video_count','top_category']].to_string(index=False)}
- 
---- TOP 5 ENGAGEMENT RATE LEADERS ---
-{eng_leaders}
- 
---- CATEGORY PERFORMANCE (top 6) ---
-{cat_stats[['total_views','median_views','video_count','avg_engagement']].to_string()}
- 
---- TOP 3 INDIVIDUAL VIDEOS ---
-{top_videos}
-"""
- 
-    # ── Analysis type selector ────────────────────────────────
-    analysis_type = st.radio(
-        "Choose analysis focus:",
-        ["Full Analysis", "Trend Deep-Dive", "Competitor Strategy"],
-        horizontal=True
-    )
- 
-    if st.button("Generate AI Insights", type="primary"):
-        summary = build_summary()
-        type_map = {
-            "Full Analysis"      : "full",
-            "Trend Deep-Dive"    : "trends",
-            "Competitor Strategy": "competitors"
-        }
-        selected = type_map[analysis_type]
- 
-        # FIX: much more specific prompts with explicit output format
-        prompts = {
-            "full": f"""You are a senior YouTube data analyst.
-Analyze the data below and respond with EXACTLY these 5 sections:
- 
-**1. KEY FINDINGS**
-- [3 bullet points with specific numbers from the data]
- 
-**2. CATEGORY INSIGHTS**
-- [Which categories dominate and why, with view/engagement numbers]
- 
-**3. TREND INTERPRETATION**
-- [What the view trend means, is growth accelerating or slowing?]
- 
-**4. TOP CHANNEL STRATEGY**
-- [What makes the #1 channel win — views vs engagement tradeoff]
- 
-**5. ACTIONABLE RECOMMENDATIONS**
-- [3 specific tactics a new creator should copy, with data backing]
- 
-DATA:
-{summary}""",
- 
-            "trends": f"""You are a data analyst specializing in YouTube growth.
-Answer these 4 questions using ONLY the numbers in the data:
- 
-**Q1. Is overall viewership growing or declining?**
-[Use the trend R² and % change figures. Be specific.]
- 
-**Q2. Which category is growing fastest?**
-[Compare category view totals and video counts from the data.]
- 
-**Q3. Is the 8-week forecast reliable?**
-[Comment specifically on the R² score — is it strong enough to trust?]
- 
-**Q4. What should a creator do right now?**
-[3 specific actions based on the trend data above.]
- 
-DATA:
-{summary}""",
- 
-            "competitors": f"""You are a competitive intelligence analyst for YouTube.
-Answer these 4 questions using the channel data provided:
- 
-**Q1. Which channel has the best overall strategy?**
-[Compare top channel's views vs engagement — high views + low engagement vs high engagement + fewer views]
- 
-**Q2. Who is punching above their weight?**
-[Find the channel with highest engagement rate despite fewer views — this is the hidden threat]
- 
-**Q3. What content categories are underserved?**
-[Look at category breakdown — which has few videos but high median views per video?]
- 
-**Q4. Two tactics to steal immediately**
-[Pick 2 specific strategies from top performers a new channel should copy]
- 
-DATA:
-{summary}"""
-        }
- 
-        with st.spinner("Gemini is analyzing your data..."):
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=google_api_key)
-                model = genai.GenerativeModel('models/gemini-2.5-flash')
-                response = model.generate_content(prompts[selected])
-                insight  = response.text
- 
-                # Render with proper markdown (not raw HTML replace)
-                st.markdown("---")
-                st.markdown(insight)
-                st.markdown("---")
- 
-                st.download_button(
-                    "⬇️ Download Insights",
-                    data=json.dumps({
-                        "analysis_type": analysis_type,
-                        "insight"      : insight,
-                        "data_summary" : summary
-                    }, indent=2),
-                    file_name="ai_insights.json",
-                    mime="application/json"
+        label = st.selectbox("Momentum metric", list(metric_map), key="velocity_metric")
+        metric_col = metric_map[label]
+        leaders = (
+            intel["latest_video_state"]
+            .dropna(subset=[metric_col])
+            .sort_values(metric_col, ascending=False)
+            .head(15)
+            .copy()
+        )
+        fig = px.bar(
+            leaders.sort_values(metric_col),
+            x=metric_col, y="video_title", orientation="h",
+            color="region_code",
+            title=f"Leaders — {label}",
+            labels={metric_col: label, "video_title": "Video", "region_code": "Region"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        cols = [
+            "video_title", "channel_name", "category_name", "region_code",
+            "trending_rank", "rank_movement", metric_col
+        ]
+        st.dataframe(leaders[cols], hide_index=True, use_container_width=True)
+
+    with life_tab:
+        life = (
+            intel["latest_video_state"]
+            .sort_values(["days_trending", "trending_observations"], ascending=False)
+            .head(20)
+            .copy()
+        )
+        l1, l2, l3 = st.columns(3)
+        l1.metric("Longest observed lifecycle", f"{life['days_trending'].max():.1f} days")
+        l2.metric("Max observations", fmt_int(life["trending_observations"].max()))
+        l3.metric(
+            "New on latest date",
+            fmt_int((current["trending_observations"] == 1).sum()),
+        )
+
+        fig = px.scatter(
+            life,
+            x="hours_trending",
+            y="trending_observations",
+            size="view_count",
+            color="region_code",
+            hover_name="video_title",
+            title="Lifecycle: Time Trending vs Observations",
+            labels={
+                "hours_trending": "Hours trending",
+                "trending_observations": "Trending observations",
+            },
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        life_cols = [
+            "video_title", "channel_name", "region_code", "first_seen", "last_seen",
+            "trending_observations", "hours_trending", "days_trending", "trending_rank"
+        ]
+        st.dataframe(life[life_cols], hide_index=True, use_container_width=True)
+
+
+# ---------------------------------------------------------------------
+# CONTENT INTELLIGENCE
+# ---------------------------------------------------------------------
+with tabs[2]:
+    st.subheader("🎬 Content Intelligence")
+    channel_tab, category_tab = st.tabs(["Channels", "Categories"])
+
+    with channel_tab:
+        region_choice = st.selectbox(
+            "Channel region",
+            ["All"] + sorted(intel["channel_trends"]["region_code"].dropna().unique().tolist()),
+            key="channel_region",
+        )
+        ch = intel["channel_trends"].copy()
+        if region_choice != "All":
+            ch = ch[ch["region_code"] == region_choice]
+        if region_choice == "All":
+            ch = (
+                ch.groupby("channel_name", as_index=False)
+                .agg(
+                    unique_trending_videos=("unique_trending_videos", "sum"),
+                    trending_observations=("trending_observations", "sum"),
+                    active_trending_days=("active_trending_days", "max"),
+                    average_rank=("average_rank", "mean"),
+                    average_view_velocity=("average_view_velocity", "mean"),
+                    average_engagement_rate=("average_engagement_rate", "mean"),
                 )
-            except Exception as e:
-                st.error(f"Gemini API error: {e}")
- 
-    # ── Custom Question ───────────────────────────────────────
-    st.divider()
-    st.subheader("Ask a Custom Question")
-    user_q = st.text_input(
-        "Ask anything about your YouTube data:",
-        placeholder="e.g. Which channel has the best growth trajectory?"
+            )
+        leaders = ch.sort_values(
+            ["unique_trending_videos", "trending_observations"], ascending=False
+        ).head(15)
+
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            fig = px.bar(
+                leaders.sort_values("unique_trending_videos"),
+                x="unique_trending_videos", y="channel_name", orientation="h",
+                title="Channel Trending Frequency",
+                labels={"unique_trending_videos": "Unique trending videos", "channel_name": "Channel"},
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            if not leaders.empty:
+                top = leaders.iloc[0]
+                st.success(
+                    f"🏆 **Most frequent channel**\n\n"
+                    f"### {top['channel_name']}\n"
+                    f"{fmt_int(top['unique_trending_videos'])} unique trending videos\n\n"
+                    f"{fmt_int(top['trending_observations'])} observations\n\n"
+                    f"Avg rank: {fmt_float(top['average_rank'])}"
+                )
+        st.dataframe(leaders, hide_index=True, use_container_width=True)
+
+    with category_tab:
+        region_choice = st.selectbox(
+            "Category region",
+            ["All"] + sorted(intel["category_trends"]["region_code"].dropna().unique().tolist()),
+            key="category_region",
+        )
+        cats = intel["category_trends"].copy()
+        if region_choice != "All":
+            cats = cats[cats["region_code"] == region_choice]
+        else:
+            cats = (
+                cats.groupby("category_name", as_index=False)
+                .agg(
+                    unique_trending_videos=("unique_trending_videos", "sum"),
+                    trending_observations=("trending_observations", "sum"),
+                    active_trending_days=("active_trending_days", "max"),
+                    average_rank=("average_rank", "mean"),
+                    best_rank=("best_rank", "min"),
+                    average_view_velocity=("average_view_velocity", "mean"),
+                    average_like_velocity=("average_like_velocity", "mean"),
+                    average_comment_velocity=("average_comment_velocity", "mean"),
+                    average_engagement_rate=("average_engagement_rate", "mean"),
+                )
+            )
+        cats = cats.sort_values("trending_observations", ascending=False)
+        st.markdown("#### Category Board")
+        top_cats = cats.head(6)
+        card_cols = st.columns(3)
+        for i, (_, row) in enumerate(top_cats.iterrows()):
+            with card_cols[i % 3]:
+                icon = category_icon(row["category_name"])
+                st.info(
+                    f"{icon} **{row['category_name']}**\n\n"
+                    f"**{fmt_int(row['trending_observations'])}** observations  \n"
+                    f"⚡ {fmt_int(row['average_view_velocity'])} views/hour  \n"
+                    f"🏆 Avg rank {fmt_float(row['average_rank'])}  \n"
+                    f"❤️ {fmt_pct_fraction(row['average_engagement_rate'])} engagement"
+                )
+
+        selected_category = st.selectbox(
+            "Explore category",
+            cats["category_name"].tolist(),
+            key="selected_category",
+        )
+        selected = cats[cats["category_name"] == selected_category].iloc[0]
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Trending observations", fmt_int(selected["trending_observations"]))
+        k2.metric("Unique videos", fmt_int(selected["unique_trending_videos"]))
+        k3.metric("Avg view velocity", fmt_int(selected["average_view_velocity"]))
+        k4.metric("Avg engagement", fmt_pct_fraction(selected["average_engagement_rate"]))
+
+
+# ---------------------------------------------------------------------
+# REGIONAL INTELLIGENCE
+# ---------------------------------------------------------------------
+with tabs[3]:
+    st.subheader("🌎 Regional Intelligence")
+    regional_tab, reach_tab = st.tabs(["Regional Comparison", "Global vs Regional"])
+
+    with regional_tab:
+        regional = intel["regional_trends"].copy().sort_values("region_code")
+        cols = st.columns(len(regional))
+        for col, (_, row) in zip(cols, regional.iterrows()):
+            with col:
+                st.markdown(f"### {row['region_code']}")
+                st.caption(
+                    f"{fmt_int(row['unique_trending_videos'])} videos · "
+                    f"{fmt_int(row['unique_channels'])} channels"
+                )
+                st.metric("Avg rank", fmt_float(row["average_rank"]))
+                st.metric("View velocity", fmt_int(row["average_view_velocity"]))
+                st.metric("Engagement", fmt_pct_fraction(row["average_engagement_rate"]))
+
+        a, b = st.columns(2)
+        with a:
+            fig = px.bar(
+                regional, x="region_code", y="average_view_velocity",
+                title="Average View Velocity",
+                labels={"region_code": "Region", "average_view_velocity": "Views / hour"},
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        with b:
+            fig = px.bar(
+                regional, x="region_code", y="average_engagement_rate",
+                title="Average Engagement Rate",
+                labels={"region_code": "Region", "average_engagement_rate": "Engagement"},
+            )
+            fig.update_yaxes(tickformat=".1%")
+            st.plotly_chart(fig, use_container_width=True)
+
+    with reach_tab:
+        gr = intel["global_vs_regional"].copy()
+        cross = gr[gr["reach_type"] == "cross_region"]
+        local = gr[gr["reach_type"] == "region_specific"]
+
+        a, b, c = st.columns(3)
+        if not cross.empty and not local.empty:
+            a.metric("Cross-region videos", fmt_int(cross.iloc[0]["unique_videos"]))
+            b.metric("Region-specific videos", fmt_int(local.iloc[0]["unique_videos"]))
+            ratio = cross.iloc[0]["average_view_velocity"] / local.iloc[0]["average_view_velocity"]
+            c.metric("Velocity advantage", f"{ratio:.2f}×")
+
+        display = gr.copy()
+        display["reach_type"] = display["reach_type"].replace(
+            {"cross_region": "Cross-region", "region_specific": "Region-specific"}
+        )
+        metric = st.selectbox(
+            "Comparison metric",
+            ["average_view_velocity", "average_rank", "average_engagement_rate"],
+            format_func=lambda x: x.replace("_", " ").title(),
+            key="reach_metric",
+        )
+        fig = px.bar(
+            display, x="reach_type", y=metric,
+            title=metric.replace("_", " ").title(),
+            labels={"reach_type": "Reach type", metric: metric.replace("_", " ").title()},
+        )
+        if metric == "average_engagement_rate":
+            fig.update_yaxes(tickformat=".1%")
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "Cross-region means observed in at least two collected regions "
+            "(CA, GB, IN, US), not all YouTube markets."
+        )
+
+
+# ---------------------------------------------------------------------
+# ML PREDICTION
+# ---------------------------------------------------------------------
+with tabs[4]:
+    st.subheader("🤖 Tomorrow's Trend Outlook")
+    st.markdown(
+        "**Prediction question:** Will this video still be trending tomorrow "
+        "in the same region?"
     )
- 
-    if user_q and st.button("Ask Gemini"):
-        summary = build_summary()
-        with st.spinner("Thinking..."):
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=google_api_key)
-                model = genai.GenerativeModel('models/gemini-2.5-flash')
- 
-                # Better prompt — forces specific answer using the data
-                full_prompt = f"""You are a YouTube data analyst.
-Answer the question below using ONLY the data provided.
-Be specific — cite actual numbers. Keep answer under 150 words.
- 
-DATA:
-{summary}
- 
-QUESTION: {user_q}
- 
-ANSWER:"""
- 
-                response = model.generate_content(full_prompt)
- 
-                # Use st.markdown — not HTML — so selected text is always readable
-                st.markdown("**Gemini says:**")
-                st.info(response.text)   # st.info gives a styled box with proper contrast
- 
-            except Exception as e:
-                st.error(f"Gemini API error: {e}")
- 
+    st.caption(
+        "Random Forest model · chronological evaluation · probabilities calculated in Python"
+    )
 
-# ══════════════════════════════════════════════════════════════
-# TAB 4 — RAW DATA
-# ══════════════════════════════════════════════════════════════
-with tab4:
-    st.subheader("Raw Data Explorer")
-    col1, col2, col3 = st.columns(3)
-    cat_filter = col1.multiselect("Filter by Category", df['category'].unique(), default=[])
-    ch_filter  = col2.multiselect("Filter by Channel",  df['channel_title'].unique()[:20], default=[])
-    min_views  = col3.number_input("Min Views", value=0, step=1000)
+    valid = prediction_rows.copy()
+    valid["still_trending_tomorrow_probability"] = pd.to_numeric(
+        valid["still_trending_tomorrow_probability"], errors="coerce"
+    )
+    valid = valid.dropna(subset=["still_trending_tomorrow_probability"])
 
-    filtered = df.copy()
-    if cat_filter: filtered = filtered[filtered['category'].isin(cat_filter)]
-    if ch_filter:  filtered = filtered[filtered['channel_title'].isin(ch_filter)]
-    filtered = filtered[filtered['view_count'] >= min_views]
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Videos analyzed", fmt_int(len(valid)))
+    p2.metric(
+        "Likely to persist",
+        fmt_int((valid["still_trending_tomorrow_prediction"] == 1).sum()),
+    )
+    p3.metric(
+        "Average probability",
+        f"{valid['still_trending_tomorrow_probability'].mean():.1%}" if len(valid) else "—",
+    )
 
-    st.caption(f"Showing {len(filtered):,} videos")
+    st.markdown("### High-confidence persistence")
+    top_predictions = valid.sort_values(
+        "still_trending_tomorrow_probability", ascending=False
+    ).head(10)
+    fig = px.bar(
+        top_predictions.sort_values("still_trending_tomorrow_probability"),
+        x="still_trending_tomorrow_probability",
+        y="video_title",
+        orientation="h",
+        color="region_code",
+        title="Highest Persistence Probabilities",
+        labels={
+            "still_trending_tomorrow_probability": "Persistence probability",
+            "video_title": "Video",
+        },
+    )
+    fig.update_xaxes(tickformat=".0%")
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("View prediction evidence"):
+        cols = [
+            "video_title", "channel_name", "region_code", "trending_rank",
+            "rank_movement", "view_velocity", "engagement_rate",
+            "still_trending_tomorrow_prediction",
+            "still_trending_tomorrow_probability",
+        ]
+        st.dataframe(valid[cols].sort_values(
+            "still_trending_tomorrow_probability", ascending=False
+        ), hide_index=True, use_container_width=True)
+
+
+# ---------------------------------------------------------------------
+# AI INTELLIGENCE
+# ---------------------------------------------------------------------
+with tabs[5]:
+    st.subheader("✨ AI Intelligence Center")
+    st.caption(
+        "Python calculates the facts. Gemini interprets only the supplied evidence."
+    )
+
+    if not os.getenv("GOOGLE_API_KEY"):
+        st.warning("GOOGLE_API_KEY is not configured.")
+    else:
+        ai_mode = st.segmented_control(
+            "Choose intelligence view",
+            ["Trend Brief", "Rising Stories", "Regional Story"],
+            default="Trend Brief",
+        )
+
+        if st.button("Generate grounded insight", type="primary"):
+            with st.spinner("Interpreting the calculated fact package..."):
+                try:
+                    if ai_mode == "Rising Stories":
+                        answer = explain_rising_videos(facts)
+                    elif ai_mode == "Regional Story":
+                        answer = explain_regional_differences(facts)
+                    else:
+                        answer = generate_trend_summary(facts)
+                    st.session_state["ai_answer"] = answer
+                    st.session_state["ai_mode"] = ai_mode
+                except Exception as exc:
+                    st.error(f"Gemini interpretation failed: {exc}")
+
+        # Visual evidence first
+        st.markdown("### Evidence Snapshot")
+        ev1, ev2, ev3 = st.columns(3)
+        with ev1:
+            if not rising.empty:
+                r = rising.iloc[0]
+                st.success(
+                    f"🚀 **Fastest riser**\n\n{safe_text(r.get('video_title'))}\n\n"
+                    f"▲ {int(r.get('rank_movement'))} positions · {safe_text(r.get('region_code'))}"
+                )
+        with ev2:
+            gr = intel["global_vs_regional"]
+            cr = gr[gr["reach_type"] == "cross_region"]
+            rs = gr[gr["reach_type"] == "region_specific"]
+            if not cr.empty and not rs.empty:
+                ratio = cr.iloc[0]["average_view_velocity"] / rs.iloc[0]["average_view_velocity"]
+                st.info(
+                    f"🌎 **Cross-region signal**\n\n"
+                    f"{ratio:.2f}× observed view-velocity ratio"
+                )
+        with ev3:
+            reg = intel["regional_trends"].sort_values("average_view_velocity", ascending=False)
+            if not reg.empty:
+                r = reg.iloc[0]
+                st.info(
+                    f"⚡ **Velocity-leading region**\n\n"
+                    f"{r['region_code']} · {fmt_int(r['average_view_velocity'])} views/hour"
+                )
+
+        if st.session_state.get("ai_answer"):
+            st.markdown(f"### {st.session_state.get('ai_mode', 'AI')} Interpretation")
+            answer = st.session_state["ai_answer"]
+            # Keep the page readable: show a compact preview and full report on demand.
+            paragraphs = [p for p in answer.split("\n\n") if p.strip()]
+            preview = "\n\n".join(paragraphs[:4])
+            st.markdown(preview)
+            with st.expander("View full grounded AI explanation"):
+                st.markdown(answer)
+
+        st.markdown("### Ask AI about a category")
+        category_names = sorted(
+            intel["category_trends"]["category_name"].dropna().unique().tolist()
+        )
+        ai_category = st.selectbox("Category", category_names, key="ai_category")
+        st.caption(
+            f"Category-specific grounded Q&A for **{ai_category}** is presented as a "
+            "guided intelligence view; all numerical evidence remains Python-calculated."
+        )
+        st.info(
+            "Suggested questions: compare this category across regions, explain its "
+            "strongest momentum signals, or identify recurring channel patterns."
+        )
+
+
+# ---------------------------------------------------------------------
+# PIPELINE HEALTH
+# ---------------------------------------------------------------------
+with tabs[6]:
+    st.subheader("⚙️ Pipeline Health")
+    q1, q2, q3, q4 = st.columns(4)
+    q1.metric("Duplicates", fmt_int(quality["duplicate_count"]))
+    q2.metric("Complete region-days", fmt_int(quality["complete_days"]))
+    q3.metric("Incomplete region-days", fmt_int(quality["incomplete_days"]))
+    q4.metric(
+        "Category enrichment",
+        f"{quality['category_complete']:.2f}%" if pd.notna(quality["category_complete"]) else "—",
+    )
+
+    e1, e2 = st.columns(2)
+    with e1:
+        st.markdown("#### Data Quality")
+        st.progress(float(max(0, min(1, quality["category_complete"] / 100))))
+        st.caption(f"Category enrichment · {quality['category_complete']:.2f}%")
+        st.progress(float(max(0, min(1, quality["channel_complete"] / 100))))
+        st.caption(f"Channel enrichment · {quality['channel_complete']:.2f}%")
+
+    with e2:
+        st.markdown("#### Automation Architecture")
+        st.code("GitHub Actions → YouTube API → S3 → Python Analytics → ML → Gemini")
+
+    if audit.empty:
+        st.warning(
+            "Audit history is unavailable in this dashboard session. "
+            "Data-quality metrics above are calculated directly from historical snapshots."
+        )
+    else:
+        success = audit[audit["status"].astype(str).str.upper() == "SUCCESS"].copy()
+        failed = audit[audit["status"].astype(str).str.upper() == "FAILED"].copy()
+        last_success = success["ended_at"].max() if not success.empty else pd.NaT
+        freshness = (
+            (pd.Timestamp.now(tz="UTC") - last_success).total_seconds() / 3600
+            if pd.notna(last_success) else np.nan
+        )
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Successful runs", fmt_int(len(success)))
+        h2.metric("Failed runs", fmt_int(len(failed)))
+        h3.metric(
+            "Success rate",
+            f"{100 * len(success) / len(audit):.2f}%" if len(audit) else "—",
+        )
+        h4.metric(
+            "Freshness",
+            f"{freshness:.2f} h" if pd.notna(freshness) else "—",
+            delta="FRESH" if pd.notna(freshness) and freshness <= FRESHNESS_HOURS else "STALE",
+        )
+
+        audit_cols = [
+            c for c in [
+                "run_id", "started_at", "ended_at", "status",
+                "records_fetched", "records_written", "retry_count", "error_type"
+            ] if c in audit.columns
+        ]
+        with st.expander("View recent run audits"):
+            st.dataframe(
+                audit.sort_values("started_at", ascending=False)[audit_cols].head(30),
+                hide_index=True, use_container_width=True,
+            )
+
+    with st.expander("View missing-field counts"):
+        st.dataframe(
+            pd.DataFrame(
+                [{"field": k, "missing_rows": v} for k, v in quality["missing"].items()]
+            ),
+            hide_index=True, use_container_width=True,
+        )
+
+
+# ---------------------------------------------------------------------
+# EXPLORER
+# ---------------------------------------------------------------------
+with tabs[7]:
+    st.subheader("🔎 Historical Data Explorer")
+    history = intel["video_history"].copy()
+    c1, c2, c3 = st.columns(3)
+    region_filter = c1.multiselect(
+        "Region", sorted(history["region_code"].dropna().unique().tolist())
+    )
+    category_filter = c2.multiselect(
+        "Category", sorted(history["category_name"].dropna().unique().tolist())
+    )
+    min_rank = c3.number_input(
+        "Rank at or above", min_value=1, max_value=100, value=100
+    )
+
+    filtered = history.copy()
+    if region_filter:
+        filtered = filtered[filtered["region_code"].isin(region_filter)]
+    if category_filter:
+        filtered = filtered[filtered["category_name"].isin(category_filter)]
+    filtered = filtered[
+        pd.to_numeric(filtered["trending_rank"], errors="coerce") <= min_rank
+    ]
+
+    explorer_cols = [
+        "video_title", "channel_name", "category_name", "region_code",
+        "fetch_timestamp", "trending_rank", "rank_movement",
+        "view_count", "view_velocity", "engagement_rate",
+    ]
+    explorer_cols = [c for c in explorer_cols if c in filtered.columns]
+    st.caption(f"Showing {len(filtered):,} historical observations")
     st.dataframe(
-        filtered[['title','channel_title','category','published_at',
-                  'view_count','like_count','engagement_rate']]
-                .sort_values('view_count', ascending=False),
-        use_container_width=True, hide_index=True
+        filtered.sort_values("fetch_timestamp", ascending=False)[explorer_cols].head(500),
+        hide_index=True, use_container_width=True,
     )
-    st.download_button("Download CSV",
-        data=filtered.to_csv(index=False),
-        file_name="youtube_analysis.csv", mime="text/csv")
+    st.download_button(
+        "Download filtered CSV",
+        data=filtered[explorer_cols].to_csv(index=False),
+        file_name="youtube_historical_intelligence.csv",
+        mime="text/csv",
+    )
+
+st.divider()
+st.caption(
+    "Portfolio project · Historical YouTube trending snapshots from CA, GB, IN and US · "
+    "Python analytics + Random Forest + grounded Gemini interpretation"
+)
